@@ -3,6 +3,8 @@ import random
 import glob
 import numpy as np
 import sys
+import os
+import matplotlib.pyplot as plt
 
 
 class Vertex():
@@ -58,7 +60,7 @@ class GNN():
         h = self.readout()
         s = np.sum(np.dot(A, h)) + b
         pred = 1 if s > 0 else 0
-        return s, pred == self.label
+        return pred == self.label
 
 
 def relu(v):
@@ -71,19 +73,25 @@ class Classifier():
     def __init__(self, D):
         self.D = D
         self.eps= 0.001
-        self.alpha = 0.01
+        self.alpha = 0.0001
         self.A = np.random.normal(0, 0.4, (self.D))
         self.W = np.random.normal(0, 0.4, (self.D, self.D))
         self.b = 0
         self.T = 1
+        self.nu = 0.9
+        self.momentA = np.zeros(self.D)
+        self.momentW = np.zeros((self.D, self.D))
+        self.momentb = 0
+        self.bias_boost = 100
 
-    def optimizer(self, graph_list):
+    def SGDcore(self, graph_list):
         num_graph = len(graph_list)
         gradA = np.zeros((num_graph, self.D))
         gradW = np.zeros((num_graph, self.D, self.D))
         gradb = np.zeros(num_graph)
 
         losses = []
+        accs = []
         for g, graph in enumerate(graph_list):
 
             G_t = copy.deepcopy(graph)
@@ -92,7 +100,9 @@ class Classifier():
                 graph.conv_1()
                 graph.conv_2(self.W)
             loss = graph.calc_loss(self.A, self.b)
+            acc = graph.predict(self.A, self.b)
             losses.append(loss)
+            accs.append(acc)
 
             for i in range(self.D):
                 tmpA = copy.deepcopy(self.A)
@@ -117,7 +127,7 @@ class Classifier():
 
                     gradW[g, i, j] = (loss_tmp - loss) / self.eps 
 
-            tmpb = self.b
+            tmpb = copy.deepcopy(self.b)
             tmpb += self.eps
             G_tmp = copy.deepcopy(G_t)
             for t in range(self.T):
@@ -131,46 +141,71 @@ class Classifier():
         avg_gradA = np.mean(gradA, axis=0)
         avg_gradW = np.mean(gradW, axis=0)
 
+        return losses, accs, avg_gradW, avg_gradA, avg_gradb
+
+    def SGD(self, graph_list):
+        losses, accs, avg_gradW, avg_gradA, avg_gradb = self.SGDcore(graph_list)
+
         self.A -= self.alpha * avg_gradA
-        self.b -= self.alpha * avg_gradb
+        self.b -= self.alpha * avg_gradb * self.bias_boost
         self.W -= self.alpha * avg_gradW
 
-        return np.mean(losses)
+        return np.mean(losses), np.mean(accs)
 
-    def accuracy(self, graph_list):
-        pred = []
+    def validation(self, graph_list):
         flag = []
+        losses = []
         for graph in graph_list:
             for t in range(self.T):
                 graph.conv_1()
                 graph.conv_2(self.W)
-            p, res = graph.predict(self.A, self.b)
-            pred.append(p)
-            flag.append(res)
+            is_correct = graph.predict(self.A, self.b)
+            loss = graph.calc_loss(self.A, self.b)
+            flag.append(is_correct)
+            losses.append(loss)
         flag = np.array(flag)
-        return np.sum(flag) / len(graph_list)
+        loss = np.array(loss)
+        return np.mean(loss), np.sum(flag) / len(graph_list)
+
+    def momentumSGD(self, graph_list):
+        losses, accs, avg_gradW, avg_gradA, avg_gradb = self.SGDcore(graph_list)
+        self.A = self.A - self.alpha * avg_gradA + self.nu * self.momentA
+        self.b = self.b - self.alpha * avg_gradb * self.bias_boost + self.nu * self.momentb
+        self.W = self.W - self.alpha * avg_gradW + self.nu * self.momentW
+
+        self.momentA = self.alpha * avg_gradA
+        self.momentb = self.alpha * avg_gradb * self.bias_boost
+        self.momentW = self.alpha * avg_gradW
+
+        return np.mean(losses), np.mean(accs)
 
 
 class Trainer():
     def __init__(self):
-        graph_list = sorted(glob.glob('../datasets/train/*_graph.txt'))
-        label_list = sorted(glob.glob('../datasets/train/*_label.txt'))
+        root_path = os.path.abspath(os.path.dirname(__file__))[:-3]
+        graph_list = sorted(glob.glob(root_path + '/datasets/train/*_graph.txt'))
+        label_list = sorted(glob.glob(root_path + '/datasets/train/*_label.txt'))
         data_full = list(zip(graph_list, label_list))
         data_length = len(data_full)
-        self.dataset = data_full[:1000]
-        self.test_dataset = data_full[1000:2000]
+        self.dataset = data_full[:int(data_length * 0.8)]
+        self.test_dataset = data_full[int(data_length * 0.8):]
         self.data_num = len(self.dataset)
 
         self.batch_size = 8
-        self.epochs = 100
-        self.D = 8
+        self.epochs = 20
+        self.D = 4
         self.model = Classifier(self.D)
 
     def train(self):
+        train_losses = []
+        train_accs = []
+        valid_losses = []
+        valid_accs = []
         for epoch in range(self.epochs):
             random.shuffle(self.dataset)
 
             self.epoch_loss = 0
+            self.epoch_acc = 0
             self.graph_list = []
             self.batch_num = self.data_num // self.batch_size
             for iteration in range(self.batch_num):
@@ -178,17 +213,50 @@ class Trainer():
                 graphs = []
                 for pair in batch:
                     graphs.append(GNN(pair[0], pair[1], self.D))
-                loss = self.model.optimizer(graphs)
+                if(sys.argv[1] == 'SGD'):
+                    loss, acc = self.model.SGD(graphs)
+                elif(sys.argv[1] == 'momentumSGD'):
+                    loss, acc = self.model.momentumSGD(graphs)
+                else:
+                    print('Unknown optimizer name')
                 self.epoch_loss += loss
-
-            print('epoch: ', epoch)
-            print('loss: ', self.epoch_loss / self.batch_num)
+                self.epoch_acc += acc
+            train_loss = self.epoch_loss / self.batch_num
+            train_acc = self.epoch_acc / self.batch_num
 
             test_graphs = []
             for pair in self.test_dataset:
                 test_graphs.append(GNN(pair[0], pair[1], self.D))
-            acc = self.model.accuracy(test_graphs)
-            print('acc: ', acc)
+            valid_loss, valid_acc = self.model.validation(test_graphs)
+
+            train_losses.append(train_loss)
+            train_accs.append(train_acc)
+            valid_losses.append(valid_loss)
+            valid_accs.append(valid_acc)
+
+            print('train loss: ', train_loss)
+            print('train acc: ', train_acc)
+            print('valid_loss', valid_loss)
+            print('valid_acc', valid_acc)
+
+        plt.plot(train_losses, label='train loss')
+        plt.plot(valid_accs, label='valid loss')
+        plt.title('momentumSGD loss')
+        plt.legend(loc='lower_right')
+        plt.savefig('momentumSGD_loss.png')
+        plt.show()
+
+        plt.clf()
+
+        plt.plot(train_accs, label='train acc')
+        plt.plot(valid_accs, label='valid acc')
+        plt.title('momentumSGD acc')
+        plt.legend(loc='lower_right')
+        plt.savefig('momentumSGD_acc.png')
+        plt.show()
+
+        plt.clf()
 
 trainer = Trainer()
 trainer.train()
+

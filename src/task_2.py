@@ -1,4 +1,4 @@
-import math
+import numpy as np
 import copy
 import random
 
@@ -28,26 +28,20 @@ class GNN():
     def conv_1(self):
         self.a = []
         for i in range(self.size):
-            a_v = [0] * self.D
-            for adj in self.V[i].adj:
-                if adj == 1:
-                    a_v = [x + y for (x, y) in zip(a_v, self.V[i].x)]
+            a_v = np.xum([self.V[j].x for j in self.V[i].adj if j == 1])
             self.a.append(a_v)
 
     def conv_2(self, W):
         for i, a_v in enumerate(self.a):
-            self.V[i].x = relu(matMul(W, a_v))
+            self.V[i].x = relu(np.dot(W, a_v))
 
     def readout(self):
-        self.h = [0] * self.D
-        for v in self.V:
-            self.h = [x + y for (x, y) in zip(self.h, v.x)]
-
+        self.h = np.sum([v.x for v in self.V], axis=0)
         return self.h
 
     def calc_loss(self, A, b):
         h = self.readout()
-        s = sum([x * y for (x, y) in zip(A, h)]) + b
+        s = np.dot(A, h) + b
         L = self.label * math.log(1 + math.exp(-1 * s)) + (1 - self.label) * math.log(1 + math.exp(s))
         return L
 
@@ -56,13 +50,6 @@ def relu(v):
     res = []
     for e in v:
         res.append(max(0, e))
-    return res
-
-def matMul(W, a):
-    res = []
-    for row in W:
-        prodsum = sum([x * y for (x, y) in zip(row, a)])
-        res.append(prodsum)
     return res
 
 
